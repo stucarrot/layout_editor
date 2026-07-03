@@ -522,6 +522,7 @@ body.rp-collapsed #btnCollapseRp .cb-icon { transform: rotate(180deg); display: 
     <button class="mob-toggle" id="mobToggleBtn" onclick="toggleMobileMode()" title="모바일 모드 전환">📱 모바일</button>
     <button class="mbtn" onclick="saveJSON()">💾 저장</button>
     <button class="mbtn" onclick="loadJSON()">📂 불러오기</button>
+    <button class="mbtn" onclick="exportBackup()">🗂 백업</button>
     <button class="mbtn" onclick="exportHTML()">↗ HTML</button>
     <button class="mbtn accent" onclick="exportPDF()">⬇ PDF / 이미지</button>
     <input type="file" id="fileInput" accept=".json" style="display:none" onchange="handleLoad(this)">
@@ -796,7 +797,14 @@ body.rp-collapsed #btnCollapseRp .cb-icon { transform: rotate(180deg); display: 
         <button class="btnp" style="margin-top:0" onclick="savePreset()">저장</button>
       </div>
       <!-- Preset list -->
-      <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">저장된 프리셋</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <span style="font-size:12px;font-weight:600;color:var(--text2)">저장된 프리셋</span>
+        <div style="display:flex;gap:6px">
+          <button onclick="exportBackup()" style="padding:4px 10px;border:1px solid var(--border-strong);border-radius:var(--r);font-size:11px;cursor:pointer;background:none;color:var(--text2)">🗂 백업 내보내기</button>
+          <button onclick="document.getElementById('backupInput').click()" style="padding:4px 10px;border:1px solid var(--border-strong);border-radius:var(--r);font-size:11px;cursor:pointer;background:none;color:var(--text2)">📂 백업 불러오기</button>
+          <input type="file" id="backupInput" accept=".json" style="display:none" onchange="handleLoad(this)">
+        </div>
+      </div>
       <div class="preset-list" id="presetList">
         <div style="color:var(--muted);font-size:12px;padding:12px;text-align:center">저장된 프리셋 없음</div>
       </div>
@@ -1492,21 +1500,38 @@ function applyPreset(id){
   const p=_presets.find(x=>x.id===id);
   if(!p) return;
   if(p.type==='grid'){
-    S.cols=p.data.cols; S.rows=p.data.rows;
-    S.cvW=p.data.cvW; S.cvH=p.data.cvH;
-    S.colWidths=[...(p.data.colWidths||[])];
-    S.rowHeights=[...(p.data.rowHeights||[])];
-    S.hdrH=p.data.hdrH||0; S.ftrH=p.data.ftrH||0;
-    document.getElementById('gCols').value=S.cols;
-    document.getElementById('gRows').value=S.rows;
-    document.getElementById('cvW').value=S.cvW;
-    document.getElementById('cvH').value=S.cvH;
-    document.getElementById('hdrH').value=S.hdrH;
-    document.getElementById('ftrH').value=S.ftrH;
-    // Rebuild cells
-    S.blocks={}; S.cells=[]; S.selected.clear(); S.active=null;
-    for(let r=0;r<S.rows;r++) for(let c=0;c<S.cols;c++) S.cells.push({r,c,id:cid(r,c)});
-    syncPanel(); render();
+    const hasBlocks=Object.keys(S.blocks).length>0;
+    const go=()=>{
+      S.cols=p.data.cols; S.rows=p.data.rows;
+      S.cvW=p.data.cvW; S.cvH=p.data.cvH;
+      S.colWidths=[...(p.data.colWidths||[])];
+      S.rowHeights=[...(p.data.rowHeights||[])];
+      S.hdrH=p.data.hdrH||0; S.ftrH=p.data.ftrH||0;
+      document.getElementById('gCols').value=S.cols;
+      document.getElementById('gRows').value=S.rows;
+      document.getElementById('cvW').value=S.cvW;
+      document.getElementById('cvH').value=S.cvH;
+      document.getElementById('hdrH').value=S.hdrH;
+      document.getElementById('ftrH').value=S.ftrH;
+      // Rebuild cells only — keep blocks if they fit
+      S.cells=[];
+      for(let r=0;r<S.rows;r++) for(let c=0;c<S.cols;c++) S.cells.push({r,c,id:cid(r,c)});
+      // Remove blocks whose cells are now out of range
+      Object.keys(S.blocks).forEach(bid=>{
+        const bl=S.blocks[bid];
+        if(!bl.cells) return;
+        bl.cells=bl.cells.filter(cid=>{
+          const ri=+cid.slice(1,cid.indexOf('c')), ci=+cid.slice(cid.indexOf('c')+1);
+          return ri<S.rows && ci<S.cols;
+        });
+        if(bl.cells.length===0) delete S.blocks[bid];
+      });
+      S.selected.clear(); S.active=null;
+      syncPanel(); render();
+    };
+    if(hasBlocks){
+      openModal('그리드 프리셋을 적용하면 범위를 벗어난 블록이 삭제될 수 있습니다. 계속할까요?',()=>{ closeModal(); go(); });
+    } else { go(); }
   } else {
     if(!S.active){ alert('블록을 먼저 선택하세요.'); return; }
     Object.assign(S.blocks[S.active].style, p.data);
@@ -1784,15 +1809,32 @@ function removeBlock(bid){ splitBlockById(bid); }
 // Save / Load
 // ──────────────────────────────────────────────────────
 function saveJSON(){
-  const doc={title:document.getElementById('docTitle').value,
+  const doc={
+    title:document.getElementById('docTitle').value,
     cvW:S.cvW,cvH:S.cvH,cols:S.cols,rows:S.rows,canvasBg:S.canvasBg,
     hdrH:S.hdrH,ftrH:S.ftrH,
     colWidths:S.colWidths,rowHeights:S.rowHeights,
     blocks:S.blocks,hdrBlock:S.hdrBlock,ftrBlock:S.ftrBlock,
-    customFonts};
+    customFonts,
+    presets:_presets   // ← 프리셋도 문서에 포함
+  };
   const a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob([JSON.stringify(doc,null,2)],{type:'application/json'}));
   a.download=(doc.title||'문서')+'.json'; a.click();
+}
+
+function exportBackup(){
+  const backup={
+    _type:'backup',
+    _version:1,
+    _date:new Date().toISOString(),
+    presets:_presets,
+    customFonts
+  };
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([JSON.stringify(backup,null,2)],{type:'application/json'}));
+  a.download='레이아웃편집기_백업_'+new Date().toISOString().slice(0,10)+'.json';
+  a.click();
 }
 function loadJSON(){ document.getElementById('fileInput').click(); }
 function handleLoad(inp){
@@ -1801,14 +1843,27 @@ function handleLoad(inp){
   r.onload=e=>{
     try{
       const doc=JSON.parse(e.target.result);
+
+      // ── 백업 파일 (presets only) ──
+      if(doc._type==='backup'){
+        if(doc.presets){ _presets=doc.presets; savePresetsToStorage(); }
+        if(doc.customFonts){ customFonts=doc.customFonts; populateFontSelect(); }
+        alert(`백업 불러오기 완료: 프리셋 ${(_presets.length)}개`);
+        inp.value=''; return;
+      }
+
+      // ── 문서 파일 ──
       document.getElementById('docTitle').value=doc.title||'불러온 문서';
       S.cvW=doc.cvW||840; S.cvH=doc.cvH||594;
       S.cols=doc.cols||4; S.rows=doc.rows||3;
       S.canvasBg=doc.canvasBg||'#ffffff';
       S.hdrH=doc.hdrH||0; S.ftrH=doc.ftrH||0;
       S.colWidths=doc.colWidths||[]; S.rowHeights=doc.rowHeights||[];
+      S.blocks=doc.blocks||{};          // ← 핵심: 블록 복원
       S.hdrBlock=doc.hdrBlock||null; S.ftrBlock=doc.ftrBlock||null;
-      customFonts=doc.customFonts||[];
+      if(doc.customFonts) customFonts=doc.customFonts;
+      if(doc.presets){ _presets=doc.presets; savePresetsToStorage(); }
+
       document.getElementById('cvW').value=S.cvW;
       document.getElementById('cvH').value=S.cvH;
       document.getElementById('gCols').value=S.cols;
@@ -1816,9 +1871,10 @@ function handleLoad(inp){
       document.getElementById('canvasBg').value=S.canvasBg;
       document.getElementById('hdrH').value=S.hdrH;
       document.getElementById('ftrH').value=S.ftrH;
+
       S.selected.clear(); S.active=null;
       S.cells=[];
-      for(let r=0;r<S.rows;r++) for(let c=0;c<S.cols;c++) S.cells.push({r,c,id:cid(r,c)});
+      for(let rr=0;rr<S.rows;rr++) for(let c=0;c<S.cols;c++) S.cells.push({r:rr,c,id:cid(rr,c)});
       populateFontSelect(); syncPanel(); render();
     }catch(err){ alert('파일 오류: '+err.message); }
   };
